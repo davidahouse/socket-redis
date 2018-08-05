@@ -6,28 +6,65 @@ import (
   "github.com/gorilla/websocket"
   "net/http"
   "strconv"
+  "flag"
+  "os"
 )
 
-// TODO: Pull the port from environment or something similar
-var addr = "localhost:8081"
 var upgrader = websocket.Upgrader{}
 var updateChannel = make(chan *redis.Message)
 var client *redis.Client
 
+var flags = CaptureFlags()
+
+type Flags struct {
+  RedisHost string
+  RedisPort string
+  SocketHost string
+  SocketPort string
+  SocketPath string
+  Channels string
+  LogLevel string
+}
+
+func Getenv(variable string, defaultValue string) string {
+  val, ok := os.LookupEnv(variable)
+  if ok {
+    return val
+  } else {
+    return defaultValue
+  }
+}
+
+func CaptureFlags() *Flags {
+  var flags Flags
+
+  redisHost := flag.String("redisHost", Getenv("REDIS_HOST", "localhost"), "Redis host name")
+  redisPort := flag.String("redisPort", Getenv("REDIS_PORT", "6379"), "Redis port")
+  socketHost := flag.String("socketHost", Getenv("SOCKET_HOST", "localhost"), "Websocket host name")
+  socketPort := flag.String("socketPort", Getenv("SOCKET_PORT", "8081"), "Websocket port")
+  socketPath := flag.String("socketPath", Getenv("SOCKET_PATH", "/commands"), "Websocket http path")
+  channels := flag.String("channels", Getenv("REDIS_CHANNELS", "*"), "Channels to subscribe to")
+  logLevel := flag.String("logLevel", "error", "Log level: debug or error")
+  flag.Parse()
+
+  flags.RedisHost = *redisHost
+  flags.RedisPort = *redisPort
+  flags.SocketHost = *socketHost
+  flags.SocketPort = *socketPort
+  flags.SocketPath = *socketPath
+  flags.Channels = *channels
+  flags.LogLevel = *logLevel
+  return &flags
+}
+
 func receiveEvents(c *websocket.Conn) {
 	defer c.Close()
 	for {
-		mt, message, err := c.ReadMessage()
+		_, _, err := c.ReadMessage()
 		if err != nil {
 			fmt.Println("read: ", err)
 			return
 		}
-
-    fmt.Println("mt: ", mt)
-		fmt.Println("recv: ", message)
-
-    // TODO: Implement the redis command set here. Basically just pass through the
-    // command and return the result to the client
   }
 }
 
@@ -60,22 +97,19 @@ func commands(w http.ResponseWriter, r *http.Request) {
 func main() {
   fmt.Println("Starting socket-redis...")
 
-  // TODO: make the url here configurable
-  http.HandleFunc("/commands", commands)
+  http.HandleFunc(flags.SocketPath, commands)
 	fmt.Println("starting socket listener...")
-  go http.ListenAndServe(addr, nil)
+  go http.ListenAndServe(flags.SocketHost + ":" + flags.SocketPort, nil)
 
-  // TODO: also configure what port to use and IP to bind to
   client = redis.NewClient(&redis.Options{
-  		Addr:     "localhost:6379",
+  		Addr:     flags.RedisHost + ":" + flags.RedisPort,
   		DB:       0,
   	})
 
   pong, err := client.Ping().Result()
   fmt.Println(pong, err)
 
-  // TODO: Make the client actualy subscribe instead of doing this automatically
-  pubsub := client.PSubscribe("*")
+  pubsub := client.PSubscribe(flags.Channels)
   defer pubsub.Close()
 
   for {
@@ -83,7 +117,9 @@ func main() {
     if err != nil {
       panic(err)
     }
-    fmt.Println("Message: ", msg)
+    if flags.LogLevel == "debug" {
+      fmt.Println("Message: ", msg)
+    }
     select {
     case updateChannel <- msg:
     default:
